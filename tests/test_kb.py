@@ -432,6 +432,163 @@ class VocabularyCheckTests(unittest.TestCase):
         self.assertTrue(errors[0].startswith("knowledge/domain/vocabulary.md:1: TERM-001: 避ける言い方"), errors[0])
 
 
+VALID_CAND = """## CAND-001 雨に弱い選手がいるか
+
+- 内容: 雨のレースで成績が落ちる選手がいるか。
+- 文献の根拠: なし
+- 保留の理由: 選手あたりの雨の走数が十数走で、検出力が足りない
+- 前回の試算: 並べ替え検定で p=0.65
+- 判断に要るデータ: 2024-01 までの遡り
+- 見直しの時期: 2026-12 下旬
+- 最終確認日: 2026-11-01
+- 関係する知識: RULE-001
+"""
+
+VALID_OBS = """## OBS-001 先行ラインの番手が早めに離れた
+
+- 日付: 2000-01-01
+- 場: 架空
+- レース: 7R
+- 内容: 先行ラインの番手が、打鐘の前に離れた。
+- 関係する知識: RULE-001
+- 記録日: 2000-01-02
+"""
+
+
+def with_source(source: str) -> str:
+    return VALID_RULE.replace("keirin-platform:docs/score-correction.md@0850049 §1", source)
+
+
+class KeirinCheckTests(unittest.TestCase):
+    def assert_error(self, errors: list[str], *needles: str) -> None:
+        self.assertTrue(
+            any(all(n in e for n in needles) for e in errors),
+            f"{needles} を含む誤りがない: {errors}",
+        )
+
+    def test_candidates_are_checked(self):
+        root = make_tree({"candidates.md": "## CAND-001 x\n"})
+        errors = kb.check(root)
+        self.assertEqual(len(errors), 8, errors)
+        self.assert_error(errors, "candidates.md:1: CAND-001", "必須キー「文献の根拠」")
+
+    def test_valid_candidate_passes(self):
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "candidates.md": VALID_CAND})
+        self.assertEqual(kb.check(root), [])
+        self.assertEqual([e.id for e in kb.load_candidates(root)], ["CAND-001"])
+        self.assertEqual([e.id for e in kb.load(root)], ["RULE-001"])
+
+    def test_candidate_id_must_use_cand_prefix(self):
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "candidates.md": VALID_CAND.replace("CAND-001", "RULE-009")})
+        self.assert_error(kb.check(root), "candidates.md", "RULE-009", "CAND")
+
+    def test_candidate_date_is_checked(self):
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "candidates.md": VALID_CAND.replace("2026-11-01", "11月1日")})
+        self.assert_error(kb.check(root), "CAND-001", "最終確認日")
+
+    def test_knowledge_cannot_depend_on_candidate(self):
+        root = make_tree({
+            "knowledge/domain/rules.md": with_source("オーナー（2026-11-01 の会話）").replace("- 依存: なし", "- 依存: CAND-001"),
+            "candidates.md": VALID_CAND.replace("- 関係する知識: RULE-001", "- 関係する知識: なし"),
+        })
+        self.assertEqual(kb.check(root), ["knowledge/domain/rules.md:1: RULE-001: 依存「CAND-001」は候補（候補には依存できない）"])
+
+    def test_candidate_related_knowledge_must_exist(self):
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "candidates.md": VALID_CAND.replace("RULE-001", "LAW-009")})
+        self.assert_error(kb.check(root), "CAND-001", "関係する知識「LAW-009」が見つからない")
+
+    def test_platform_source_requires_commit(self):
+        bad = make_tree({"knowledge/domain/rules.md": with_source("keirin-platform:CLAUDE.md 分析するときの前提")})
+        self.assert_error(kb.check(bad), "RULE-001", "出典「keirin-platform:CLAUDE.md 分析するときの前提」は不正")
+        good = make_tree({"knowledge/domain/rules.md": with_source("keirin-platform:CLAUDE.md@0850049 分析するときの前提")})
+        self.assertEqual(kb.check(good), [])
+
+    def test_source_forms(self):
+        for source in (
+            "オーナー（2026-11-01 の会話）",
+            "https://keirin.jp/pc/static/beginner/basics/lines.html 入門",
+            "https://keirin.jp/pc/static/beginner/basics/lines.html",
+            "keirin-data:observations.md OBS-001",
+            "keirin-platform:docs/a.md@0850049 §1、\n  オーナー（2026-11-01 の会話）",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(kb.check(make_tree({"knowledge/domain/rules.md": with_source(source)})), [])
+        for source in ("オーナー（2026-13-01 の会話）", "ユーザー（2026-11-01 の会話）", "どこかで見た", "keirin-data:observations.md"):
+            with self.subTest(source=source):
+                self.assert_error(kb.check(make_tree({"knowledge/domain/rules.md": with_source(source)})), "RULE-001", "出典")
+
+    def test_observation_source_does_not_need_keirin_data(self):
+        root = make_tree({"knowledge/domain/rules.md": with_source("keirin-data:observations.md OBS-001")})
+        self.assertFalse((root.parent / "keirin-data").exists())
+        self.assertEqual(kb.check(root), [])
+
+    def test_public_scan_flags_registration_numbers_and_urls(self):
+        body = "- 内容: 123456 の選手。\n  https://example.streamlit.app/ を見る。\n  /pc/json を呼ぶ。\n  JSJ002 で取る。\n"
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE.replace("- 内容: S級、A級、L級がある。\n", body)})
+        errors = kb.check(root)
+        self.assertEqual(len(errors), 4, errors)
+        self.assert_error(errors, "knowledge/domain/rules.md:3:", "選手登録番号に見える6桁の数字", "123456")
+        self.assert_error(errors, "knowledge/domain/rules.md:4:", "ビューアの URL")
+        self.assert_error(errors, "knowledge/domain/rules.md:5:", "内部 API の場所")
+        self.assert_error(errors, "knowledge/domain/rules.md:6:", "内部 API の種類の番号", "JSJ002")
+
+    def test_public_scan_ignores_dates_counts_and_commits(self):
+        body = "- 内容: 2026-10-05 から 23,456 レース。@0850049 と @3f2a9c1、1234567。\n"
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE.replace("- 内容: S級、A級、L級がある。\n", body)})
+        self.assertEqual(kb.check(root), [])
+
+    def test_public_scan_covers_skills_evals_and_entry_files(self):
+        root = make_tree({
+            "skills/x/SKILL.md": "# x\n123456\n",
+            "evals/t1/prompt.md": "123456\n",
+            "candidates.md": VALID_CAND.replace("p=0.65", "p=0.65 123456").replace("RULE-001", "なし"),
+            "AGENTS.md": "123456\n",
+            "README.md": "123456\n",
+            "CLAUDE.md": "123456\n",
+        })
+        errors = kb.check(root)
+        for path in ("skills/x/SKILL.md:2:", "evals/t1/prompt.md:1:", "candidates.md:", "AGENTS.md:1:", "README.md:1:", "CLAUDE.md:1:"):
+            self.assert_error(errors, path, "123456")
+
+    def test_vocabulary_scan_covers_candidates(self):
+        root = make_tree({
+            "knowledge/domain/vocabulary.md": VALID_TERM,
+            "candidates.md": VALID_CAND.replace("雨のレースで", "1号車は雨のレースで").replace("RULE-001", "なし"),
+        })
+        self.assertEqual(kb.check(root), ["candidates.md:3: 避ける言い方「号車」"])
+
+    def test_observations_checked_only_when_given(self):
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "obs/observations.md": "## OBS-001 x\n- 日付: 2000-01-01\n"})
+        self.assertEqual(kb.check(root), [])
+        errors = kb.check(root, observations=root / "obs/observations.md")
+        self.assert_error(errors, "OBS-001", "必須キー「記録日」")
+        self.assert_error(errors, "OBS-001", "必須キー「場」")
+
+    def test_valid_observations_pass(self):
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "obs/observations.md": "# 観察記録\n\n" + VALID_OBS})
+        self.assertEqual(kb.check(root, observations=root / "obs/observations.md"), [])
+
+    def test_observation_related_knowledge_and_dates_are_checked(self):
+        text = VALID_OBS.replace("RULE-001", "LAW-009").replace("2000-01-02", "昨日")
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "obs/observations.md": text + "\n" + VALID_OBS})
+        errors = kb.check(root, observations=root / "obs/observations.md")
+        self.assert_error(errors, "OBS-001", "関係する知識「LAW-009」が見つからない")
+        self.assert_error(errors, "OBS-001", "記録日")
+        self.assert_error(errors, "OBS-001", "重複")
+
+    def test_observation_may_relate_to_a_candidate(self):
+        root = make_tree({
+            "knowledge/domain/rules.md": VALID_RULE,
+            "candidates.md": VALID_CAND,
+            "obs/observations.md": VALID_OBS.replace("RULE-001", "CAND-001"),
+        })
+        self.assertEqual(kb.check(root, observations=root / "obs/observations.md"), [])
+
+    def test_next_id_for_candidates(self):
+        root = make_tree({"candidates.md": VALID_CAND + "\n" + VALID_CAND.replace("CAND-001", "CAND-003")})
+        self.assertEqual(kb.next_id(kb.load_candidates(root), "CAND"), "CAND-004")
+
+
 class CliTests(unittest.TestCase):
     def run_kb(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -526,6 +683,17 @@ class CliTests(unittest.TestCase):
         self.assertEqual((with_terms.returncode, with_terms.stdout), (0, "号車|[0-9]頭\n"))
         without = self.run_kb("vocab-regex", "--root", str(make_tree({})))
         self.assertEqual((without.returncode, without.stdout), (0, "\n"))
+
+    def test_cli_next_id_for_candidates(self):
+        root = make_tree({"candidates.md": VALID_CAND.replace("RULE-001", "なし")})
+        result = self.run_kb("next-id", "CAND", "--root", str(root))
+        self.assertEqual((result.returncode, result.stdout), (0, "CAND-002\n"))
+
+    def test_cli_check_with_observations(self):
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "obs/observations.md": "## OBS-001 x\n"})
+        result = self.run_kb("check", "--root", str(root), "--observations", str(root / "obs/observations.md"))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("OBS-001", result.stdout)
 
     def test_cli_queries_default_to_the_parent_of_tools(self):
         for argv in (["dependents", "RULE-001"], ["next-id", "RULE"], ["vocab-regex"]):

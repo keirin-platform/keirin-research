@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """keirin-research の知識の検査と問い合わせ（Python 3.12 標準ライブラリのみ）。
 
-    python3 tools/kb.py check [--root DIR]
+    python3 tools/kb.py check [--root DIR] [--observations PATH]
     python3 tools/kb.py dependents <ID> [--root DIR]
     python3 tools/kb.py next-id <PREFIX> [--root DIR]
     python3 tools/kb.py vocab-regex [--root DIR]
@@ -78,14 +78,41 @@ STATES = ("確認済み", "否定")
 COLLATIONS = ("照合済み", "未照合")
 DATE_KEYS = ("最終確認日",)
 
+# 保留の候補（知識ではない）。リポジトリの根に置き、知識はこれに依存できない
+CANDIDATES_FILE = "candidates.md"
+CANDIDATE_PREFIX = "CAND"
+CANDIDATE_KEYS = ("内容", "文献の根拠", "保留の理由", "前回の試算", "判断に要るデータ", "見直しの時期", "最終確認日", "関係する知識")
+
+# 観察記録（Private の keirin-data に置く）。`check --observations` のときだけ読む
+OBSERVATION_PREFIX = "OBS"
+OBS_KEYS = ("日付", "場", "レース", "内容", "関係する知識", "記録日")
+OBS_DATE_KEYS = ("日付", "記録日")
+
+# Public のリポジトリに書かないもの: 説明 → 正規表現
+PUBLIC_PATTERNS = {
+    "選手登録番号に見える6桁の数字": r"(?<![0-9A-Za-z])[0-9]{6}(?![0-9A-Za-z])",
+    "ビューアの URL": r"streamlit\.app",
+    "内部 API の場所": r"/pc/json",
+    "内部 API の種類の番号": r"JSJ[0-9]{3}",
+}
+PUBLIC_ROOT_FILES = ("candidates.md", "AGENTS.md", "CLAUDE.md", "README.md")
+PUBLIC_FOLDERS = ("knowledge", "skills", "evals")
+
 KNOWLEDGE_MAX_BYTES = 30_000
 SKILL_MAX_BYTES = 12_000
 
 # --- 構文 --------------------------------------------------------------------
 
 ID_RE = re.compile(r"(" + "|".join(re.escape(p) for p in FILE_FOR_PREFIX) + r")-[0-9]{3}")
+CANDIDATE_ID_RE = re.compile(CANDIDATE_PREFIX + r"-[0-9]{3}")
+OBSERVATION_ID_RE = re.compile(OBSERVATION_PREFIX + r"-[0-9]{3}")
 DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 KEY_RE = re.compile(r"- ([^:：\s]+):[ \t]*(.*)")
+PLATFORM_SOURCE_RE = re.compile(r"keirin-platform:[^\s@]+@[0-9a-f]{7,40} +\S.*")
+OBSERVATION_SOURCE_RE = re.compile(r"keirin-data:observations\.md OBS-[0-9]{3}")
+OWNER_SOURCE_RE = re.compile(r"オーナー（(.+) の会話）")
+URL_SOURCE_RE = re.compile(r"https://\S+( +\S.*)?")
+SOURCE_FORMS = "`keirin-platform:<パス>@<コミット> <節>`・`https://…`・`オーナー（YYYY-MM-DD の会話）`・`keirin-data:observations.md OBS-<3桁>`"
 DEP_SEPARATOR_RE = re.compile(r"[、,]")
 NO_DEPENDENCY = "なし"
 NO_TERMS = "なし"  # 避ける言い方がひとつもない
@@ -145,12 +172,22 @@ def load(root: Path) -> list[Entry]:
     return entries
 
 
-def deps(entry: Entry) -> list[str]:
-    """`依存` の ID の並び。`なし` や欠けている場合は空。"""
-    value = entry.fields.get("依存", "").strip()
+def load_candidates(root: Path) -> list[Entry]:
+    """根の candidates.md の候補（保留したもの）を読む。ファイルがなければ空。"""
+    path = Path(root) / CANDIDATES_FILE
+    return parse_file(path, Path(root)) if path.exists() else []
+
+
+def _id_list(value: str) -> list[str]:
+    value = value.strip()
     if value in ("", NO_DEPENDENCY):
         return []
     return [d for d in (s.strip() for s in DEP_SEPARATOR_RE.split(value)) if d]
+
+
+def deps(entry: Entry) -> list[str]:
+    """`依存` の ID の並び。`なし` や欠けている場合は空。"""
+    return _id_list(entry.fields.get("依存", ""))
 
 
 # --- 問い合わせ ---------------------------------------------------------------
@@ -227,9 +264,20 @@ def _valid_date(text: str) -> bool:
     return True
 
 
+def _valid_source(item: str) -> bool:
+    if m := OWNER_SOURCE_RE.fullmatch(item):
+        return _valid_date(m.group(1))
+    return any(
+        r.fullmatch(item) is not None
+        for r in (PLATFORM_SOURCE_RE, OBSERVATION_SOURCE_RE, URL_SOURCE_RE)
+    )
+
+
 def _check_sizes(root: Path) -> list[str]:
     errors = []
     targets = [(p, KNOWLEDGE_MAX_BYTES) for p in _markdown_files(root)]
+    if (root / CANDIDATES_FILE).exists():
+        targets.append((root / CANDIDATES_FILE, KNOWLEDGE_MAX_BYTES))
     targets += [(p, SKILL_MAX_BYTES) for p in sorted((root / "skills").glob("*/SKILL.md"))]
     for path, limit in targets:
         size = path.stat().st_size
@@ -245,7 +293,29 @@ def _vocab_scan_files(root: Path) -> list[Path]:
         for p in _markdown_files(root)
         if p.name != "README.md" and p.relative_to(root).as_posix() != FILE_FOR_PREFIX[VOCAB_PREFIX]
     ]
-    return knowledge + sorted((root / "skills").rglob("*.md"))
+    candidates = [root / CANDIDATES_FILE] if (root / CANDIDATES_FILE).exists() else []
+    return knowledge + candidates + sorted((root / "skills").rglob("*.md"))
+
+
+def public_scan_files(root: Path) -> list[Path]:
+    """公開の検査をかけるファイル（知識・スキル・評価の Markdown と、根の入口のファイル）。"""
+    files = [root / name for name in PUBLIC_ROOT_FILES if (root / name).exists()]
+    for folder in PUBLIC_FOLDERS:
+        files += sorted((root / folder).rglob("*.md"))
+    return files
+
+
+def _check_public(root: Path) -> list[str]:
+    """Public のリポジトリに書かないもの（選手登録番号、ビューアの URL、内部 API）が出てこないか。"""
+    patterns = [(desc, re.compile(p)) for desc, p in PUBLIC_PATTERNS.items()]
+    errors = []
+    for path in public_scan_files(root):
+        rel = path.relative_to(root).as_posix()
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            for desc, regex in patterns:
+                if m := regex.search(line):
+                    errors.append(f"{rel}:{number}: 公開しないもの（{desc}）「{m.group(0)}」")
+    return errors
 
 
 def _check_vocabulary(root: Path, entries: list[Entry]) -> list[str]:
@@ -307,13 +377,74 @@ def _check_entry(entry: Entry, known_ids: set[str], first_seen: dict[str, Entry]
                 errors.append(f"{where}: {VOCAB_KEY}「/{pattern}/」は{problem}")
 
     for dep in deps(entry):
-        if dep not in known_ids:
+        if CANDIDATE_ID_RE.fullmatch(dep):
+            errors.append(f"{where}: 依存「{dep}」は候補（候補には依存できない）")
+        elif dep not in known_ids:
             errors.append(f"{where}: 依存「{dep}」が見つからない")
+
+    source = entry.fields.get("出典", "").replace("\n", " ")
+    for item in (s.strip() for s in source.split("、")):
+        if item and not _valid_source(item):
+            errors.append(f"{where}: 出典「{item}」は不正（{SOURCE_FORMS} のどれか。複数なら「、」で区切る）")
     return errors
 
 
-def check(root: Path) -> list[str]:
-    """知識を検査する。各要素は `<相対パス>:<行>: <内容>`。空なら合格。"""
+def _check_simple(
+    entry: Entry,
+    where: str,
+    id_re: re.Pattern[str],
+    keys: tuple[str, ...],
+    date_keys: tuple[str, ...],
+    related_ids: set[str],
+    first_seen: dict[str, Entry],
+) -> list[str]:
+    """候補と観察記録に共通の検査（ID、重複、必須キー、日付、関係する知識）。"""
+    if not id_re.fullmatch(entry.id):
+        return [f"{where}: ID が不正（`{id_re.pattern.split('-')[0]}-<3桁の数字>` の形にする）"]
+    errors: list[str] = []
+    if entry.id in first_seen:
+        first = first_seen[entry.id]
+        errors.append(f"{where}: ID が重複している（初出 {first.line} 行目）")
+    else:
+        first_seen[entry.id] = entry
+    for key in keys:
+        if not entry.fields.get(key, "").strip():
+            errors.append(f"{where}: 必須キー「{key}」がない（または空）")
+    for key in date_keys:
+        value = entry.fields.get(key)
+        if value and not _valid_date(value):
+            errors.append(f"{where}: {key}「{value}」は YYYY-MM-DD の日付ではない")
+    for related in _id_list(entry.fields.get("関係する知識", "")):
+        if related not in related_ids:
+            errors.append(f"{where}: 関係する知識「{related}」が見つからない")
+    return errors
+
+
+def _check_candidates(root: Path, known_ids: set[str]) -> list[str]:
+    errors: list[str] = []
+    first_seen: dict[str, Entry] = {}
+    for entry in load_candidates(root):
+        where = f"{CANDIDATES_FILE}:{entry.line}: {entry.id or '(IDなし)'}"
+        errors += _check_simple(entry, where, CANDIDATE_ID_RE, CANDIDATE_KEYS, ("最終確認日",), known_ids, first_seen)
+    return errors
+
+
+def check_observations(path: Path, known_ids: set[str]) -> list[str]:
+    """keirin-data の観察記録を検査する。`known_ids` は知識と候補の ID。"""
+    path = Path(path)
+    errors: list[str] = []
+    first_seen: dict[str, Entry] = {}
+    for entry in parse_file(path, path.parent):
+        where = f"{path.as_posix()}:{entry.line}: {entry.id or '(IDなし)'}"
+        errors += _check_simple(entry, where, OBSERVATION_ID_RE, OBS_KEYS, OBS_DATE_KEYS, known_ids, first_seen)
+    return errors
+
+
+def check(root: Path, observations: Path | None = None) -> list[str]:
+    """知識を検査する。各要素は `<相対パス>:<行>: <内容>`。空なら合格。
+
+    `observations` を渡したときだけ、keirin-data の観察記録も検査する。
+    """
     root = Path(root)
     entries = load(root)
     known_ids = {e.id for e in entries}
@@ -321,7 +452,12 @@ def check(root: Path) -> list[str]:
     errors = _check_sizes(root)
     for entry in entries:
         errors.extend(_check_entry(entry, known_ids, first_seen))
+    errors.extend(_check_candidates(root, known_ids))
     errors.extend(_check_vocabulary(root, entries))
+    errors.extend(_check_public(root))
+    if observations is not None:
+        candidate_ids = {e.id for e in load_candidates(root)}
+        errors.extend(check_observations(observations, known_ids | candidate_ids))
     return errors
 
 
@@ -335,7 +471,11 @@ def build_parser() -> argparse.ArgumentParser:
     def add_root(p: argparse.ArgumentParser) -> None:
         p.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="リポジトリの根（既定: tools/ の親）")
 
-    add_root(sub.add_parser("check", help="knowledge/ と skills/ を検査する"))
+    p_check = sub.add_parser("check", help="knowledge/・candidates.md・skills/ などを検査する")
+    add_root(p_check)
+    p_check.add_argument(
+        "--observations", type=Path, default=None, help="keirin-data の observations.md も検査する"
+    )
 
     p_dependents = sub.add_parser("dependents", help="指定した知識に直接・間接に依存する知識を挙げる")
     p_dependents.add_argument("id", metavar="ID", help="例: RULE-001")
@@ -350,7 +490,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    errors = check(args.root)
+    errors = check(args.root, observations=args.observations)
     if errors:
         print("\n".join(errors))
         return 1
@@ -370,8 +510,12 @@ def cmd_dependents(args: argparse.Namespace) -> int:
 
 
 def cmd_next_id(args: argparse.Namespace) -> int:
+    if args.prefix == CANDIDATE_PREFIX:
+        print(next_id(load_candidates(args.root), CANDIDATE_PREFIX))
+        return 0
     if args.prefix not in FILE_FOR_PREFIX:
-        print(f"接頭辞「{args.prefix}」は不正（{'・'.join(FILE_FOR_PREFIX)} のどれか）", file=sys.stderr)
+        allowed = "・".join([*FILE_FOR_PREFIX, CANDIDATE_PREFIX])
+        print(f"接頭辞「{args.prefix}」は不正（{allowed} のどれか）", file=sys.stderr)
         return 1
     print(next_id(load(args.root), args.prefix))
     return 0
