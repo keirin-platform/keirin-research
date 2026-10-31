@@ -13,7 +13,9 @@ from __future__ import annotations
 import argparse
 import datetime
 import re
+import subprocess
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -88,9 +90,12 @@ OBSERVATION_PREFIX = "OBS"
 OBS_KEYS = ("日付", "場", "レース", "内容", "関係する知識", "記録日")
 OBS_DATE_KEYS = ("日付", "記録日")
 
-# Public のリポジトリに書かないもの: 説明 → 正規表現
+# Public のリポジトリに書かないもの: 説明 → 正規表現。
+# 6桁の数字は全角も見る。小数（p=0.123456 など）の一部は選手登録番号ではないので外す
 PUBLIC_PATTERNS = {
-    "選手登録番号に見える6桁の数字": r"(?<![0-9A-Za-z])[0-9]{6}(?![0-9A-Za-z])",
+    "選手登録番号に見える6桁の数字": (
+        r"(?<![0-9０-９A-Za-z])(?<![0-9０-９][.．])[0-9０-９]{6}(?![0-9０-９A-Za-z])(?![.．][0-9０-９])"
+    ),
     "ビューアの URL": r"streamlit\.app",
     "内部 API の場所": r"/pc/json",
     "内部 API の種類の番号": r"JSJ[0-9]{3}",
@@ -109,6 +114,7 @@ OBSERVATION_ID_RE = re.compile(OBSERVATION_PREFIX + r"-[0-9]{3}")
 DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 KEY_RE = re.compile(r"- ([^:：\s]+):[ \t]*(.*)")
 PLATFORM_SOURCE_RE = re.compile(r"keirin-platform:[^\s@]+@[0-9a-f]{7,40} +\S.*")
+PLATFORM_SCRIPT_RE = re.compile(r"keirin-platform:[^\s@]+@[0-9a-f]{7,40}(?![0-9A-Za-z])")  # LAW の 検証の記録
 OBSERVATION_SOURCE_RE = re.compile(r"keirin-data:observations\.md OBS-[0-9]{3}")
 OWNER_SOURCE_RE = re.compile(r"オーナー（(.+) の会話）")
 URL_SOURCE_RE = re.compile(r"https://\S+( +\S.*)?")
@@ -215,11 +221,29 @@ def dependents(entries: list[Entry], target: str) -> list[Entry]:
     return sorted(found.values(), key=lambda e: e.id)
 
 
-def next_id(entries: list[Entry], prefix: str) -> str:
-    """`prefix` の次の ID（最大の番号＋1、3桁0埋め）。まだ無ければ `<prefix>-001`。"""
+def next_id(entries: list[Entry], prefix: str, used: Iterable[str] = ()) -> str:
+    """`prefix` の次の ID（最大の番号＋1、3桁0埋め）。まだ無ければ `<prefix>-001`。
+
+    `used` は、いまはないが使ったことのある ID（消した知識や候補）。消した ID は使い回さない。
+    """
     pattern = re.compile(re.escape(prefix) + r"-([0-9]{3})")
-    numbers = [int(m.group(1)) for e in entries if (m := pattern.fullmatch(e.id))]
+    ids = [e.id for e in entries] + list(used)
+    numbers = [int(m.group(1)) for id_ in ids if (m := pattern.fullmatch(id_))]
     return f"{prefix}-{max(numbers, default=0) + 1:03d}"
+
+
+def history_ids(root: Path) -> set[str]:
+    """git の履歴で、knowledge/ か candidates/ の見出しになったことのある ID（README の書式の例は除く）。
+
+    git の外（履歴がない）なら空。
+    """
+    command = ["git", "-c", "log.showSignature=false", "-C", str(root), "log", "-p", "--no-color", "--no-ext-diff"]
+    command += ["--format=", "--", "knowledge", CANDIDATES_DIR, ":!*README.md"]
+    try:
+        log = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return set()
+    return set(re.findall(r"^[-+]## (\S+)", log, flags=re.MULTILINE))
 
 
 def _entry_patterns(entry: Entry) -> list[str]:
@@ -379,6 +403,10 @@ def _check_entry(entry: Entry, known_ids: set[str], first_seen: dict[str, Entry]
             if problem := _pattern_problem(pattern):
                 errors.append(f"{where}: {VOCAB_KEY}「/{pattern}/」は{problem}")
 
+    record = entry.fields.get("検証の記録", "")
+    if prefix == "LAW" and record.strip() and not PLATFORM_SCRIPT_RE.search(record):
+        errors.append(f"{where}: 検証の記録に、使ったスクリプトの `keirin-platform:<パス>@<コミット>` がない")
+
     for dep in deps(entry):
         if CANDIDATE_ID_RE.fullmatch(dep):
             errors.append(f"{where}: 依存「{dep}」は候補（候補には依存できない）")
@@ -435,6 +463,8 @@ def _check_candidates(root: Path, known_ids: set[str]) -> list[str]:
 def check_observations(path: Path, known_ids: set[str]) -> list[str]:
     """keirin-data の観察記録を検査する。`known_ids` は知識と候補の ID。"""
     path = Path(path)
+    if not path.is_file():
+        return [f"{path.as_posix()}:1: 観察記録のファイルが見つからない（keirin-data の observations.md を指定する）"]
     errors: list[str] = []
     first_seen: dict[str, Entry] = {}
     for entry in parse_file(path, path.parent):
@@ -484,7 +514,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_dependents.add_argument("id", metavar="ID", help="例: RULE-001")
     add_root(p_dependents)
 
-    p_next = sub.add_parser("next-id", help="接頭辞の次の ID を表示する")
+    p_next = sub.add_parser("next-id", help="接頭辞の次の ID を表示する（git の履歴で消した ID も使わない）")
     p_next.add_argument("prefix", metavar="PREFIX", help="例: RULE")
     add_root(p_next)
 
@@ -514,13 +544,14 @@ def cmd_dependents(args: argparse.Namespace) -> int:
 
 def cmd_next_id(args: argparse.Namespace) -> int:
     if args.prefix == CANDIDATE_PREFIX:
-        print(next_id(load_candidates(args.root), CANDIDATE_PREFIX))
-        return 0
-    if args.prefix not in FILE_FOR_PREFIX:
+        entries = load_candidates(args.root)
+    elif args.prefix in FILE_FOR_PREFIX:
+        entries = load(args.root)
+    else:
         allowed = "・".join([*FILE_FOR_PREFIX, CANDIDATE_PREFIX])
         print(f"接頭辞「{args.prefix}」は不正（{allowed} のどれか）", file=sys.stderr)
         return 1
-    print(next_id(load(args.root), args.prefix))
+    print(next_id(entries, args.prefix, history_ids(args.root)))
     return 0
 
 

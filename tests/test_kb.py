@@ -207,6 +207,32 @@ class CheckTests(unittest.TestCase):
         })
         self.assert_error(kb.check(root), "LAW-001", "状態「未検証」は不正（確認済み・否定 のどれか）")
 
+    def test_law_record_must_cite_the_script_and_commit(self):
+        for record in ("keirin-platform:src/keirin/research.py、2,000 レース", "uv run keirin line-linkage、2,000 レース"):
+            with self.subTest(record=record):
+                root = make_tree({
+                    "knowledge/domain/rules.md": VALID_RULE,
+                    "knowledge/domain/laws.md": VALID_LAW.replace("keirin-platform:src/keirin/research.py@0850049、2,000 レース", record),
+                })
+                errors = kb.check(root)
+                self.assertEqual(len(errors), 1, errors)
+                self.assert_error(errors, "LAW-001", "検証の記録", "keirin-platform:<パス>@<コミット>")
+
+    def test_law_record_may_cite_the_commit_inside_the_text(self):
+        record = "`uv run keirin line-linkage`（keirin-platform:src/keirin/research.py@c3a4440）。2,000 レース"
+        root = make_tree({
+            "knowledge/domain/rules.md": VALID_RULE,
+            "knowledge/domain/laws.md": VALID_LAW.replace("keirin-platform:src/keirin/research.py@0850049、2,000 レース", record),
+        })
+        self.assertEqual(kb.check(root), [])
+
+    def test_missing_law_record_is_reported_once(self):
+        root = make_tree({
+            "knowledge/domain/rules.md": VALID_RULE,
+            "knowledge/domain/laws.md": drop_line(VALID_LAW, "- 検証の記録:"),
+        })
+        self.assertEqual(len(kb.check(root)), 1)
+
     def test_prefix_file_mismatch(self):
         root = make_tree({"knowledge/domain/rules.md": VALID_RULE + "\n" + VALID_LAW})
         self.assert_error(kb.check(root), "LAW-001", "LAW の知識は knowledge/domain/laws.md に置く")
@@ -537,6 +563,18 @@ class KeirinCheckTests(unittest.TestCase):
         root = make_tree({"knowledge/domain/rules.md": VALID_RULE.replace("- 内容: S級、A級、L級がある。\n", body)})
         self.assertEqual(kb.check(root), [])
 
+    def test_public_scan_flags_full_width_registration_numbers(self):
+        body = "- 内容: １２３４５６ の選手。\n"
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE.replace("- 内容: S級、A級、L級がある。\n", body)})
+        errors = kb.check(root)
+        self.assertEqual(len(errors), 1, errors)
+        self.assert_error(errors, "knowledge/domain/rules.md:3:", "選手登録番号に見える6桁の数字", "１２３４５６")
+
+    def test_public_scan_ignores_decimals_and_longer_full_width_numbers(self):
+        body = "- 内容: p=0.123456、差 ０．１２３４５６、比 123456.5、１２３４５６７。\n"
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE.replace("- 内容: S級、A級、L級がある。\n", body)})
+        self.assertEqual(kb.check(root), [])
+
     def test_public_scan_covers_skills_evals_and_entry_files(self):
         root = make_tree({
             "skills/x/SKILL.md": "# x\n123456\n",
@@ -567,6 +605,13 @@ class KeirinCheckTests(unittest.TestCase):
     def test_valid_observations_pass(self):
         root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "obs/observations.md": "# 観察記録\n\n" + VALID_OBS})
         self.assertEqual(kb.check(root, observations=root / "obs/observations.md"), [])
+
+    def test_missing_observations_file_is_one_error(self):
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE})
+        missing = root / "obs/observations.md"
+        errors = kb.check(root, observations=missing)
+        self.assertEqual(len(errors), 1, errors)
+        self.assert_error(errors, f"{missing.as_posix()}:1:", "見つからない")
 
     def test_observation_related_knowledge_and_dates_are_checked(self):
         text = VALID_OBS.replace("RULE-001", "LAW-009").replace("2000-01-02", "昨日")
@@ -716,6 +761,39 @@ class CliTests(unittest.TestCase):
         result = self.run_kb("check", "--root", str(root), "--observations", str(root / "obs/observations.md"))
         self.assertEqual(result.returncode, 1)
         self.assertIn("OBS-001", result.stdout)
+
+    def test_cli_check_with_a_missing_observations_file_prints_one_line(self):
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE})
+        result = self.run_kb("check", "--root", str(root), "--observations", str(root / "observations.md"))
+        self.assertEqual((result.returncode, result.stderr), (1, ""))
+        self.assertEqual(len(result.stdout.splitlines()), 1, result.stdout)
+
+    def git(self, root: Path, *args: str) -> None:
+        identity = ("-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false")
+        subprocess.run(["git", "-C", str(root), *identity, *args], check=True, capture_output=True)
+
+    def test_cli_next_id_never_reuses_an_id_deleted_in_the_git_history(self):
+        rules = VALID_RULE + "\n" + VALID_RULE.replace("RULE-001", "RULE-002")
+        cand = VALID_CAND + "\n" + VALID_CAND.replace("CAND-001", "CAND-002")
+        root = make_tree({"knowledge/domain/rules.md": rules, "candidates/lines.md": cand})
+        self.git(root, "init", "-q")
+        self.git(root, "add", "-A")
+        self.git(root, "commit", "-q", "-m", "add")
+        (root / "knowledge/domain/rules.md").write_text(VALID_RULE, encoding="utf-8")
+        (root / "candidates/lines.md").write_text(VALID_CAND, encoding="utf-8")
+        self.git(root, "commit", "-q", "-am", "delete the highest ids")
+        for prefix, expected in (("RULE", "RULE-003\n"), ("CAND", "CAND-003\n")):
+            with self.subTest(prefix=prefix):
+                result = self.run_kb("next-id", prefix, "--root", str(root))
+                self.assertEqual((result.returncode, result.stdout), (0, expected), result.stderr)
+
+    def test_cli_next_id_ignores_the_format_examples_in_readme(self):
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "knowledge/README.md": "```markdown\n## RULE-009 例\n```\n"})
+        self.git(root, "init", "-q")
+        self.git(root, "add", "-A")
+        self.git(root, "commit", "-q", "-m", "add")
+        result = self.run_kb("next-id", "RULE", "--root", str(root))
+        self.assertEqual((result.returncode, result.stdout), (0, "RULE-002\n"), result.stderr)
 
     def test_cli_queries_default_to_the_parent_of_tools(self):
         for argv in (["dependents", "RULE-001"], ["next-id", "RULE"], ["vocab-regex"]):

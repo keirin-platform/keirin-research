@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import kb  # noqa: E402
 
-SIX_DIGITS = re.compile(r"(?<![0-9A-Za-z])[0-9]{6}(?![0-9A-Za-z])")
+SIX_DIGITS = re.compile(kb.PUBLIC_PATTERNS["選手登録番号に見える6桁の数字"])
 STREAMLIT_HOST = re.compile(r"[\w-]+\.streamlit\.app")
 
 
@@ -26,7 +26,7 @@ class TestFixturesAreFictional(unittest.TestCase):
         for path in sorted((ROOT / "tests").glob("*.py")):
             text = path.read_text(encoding="utf-8")
             with self.subTest(path=path.name):
-                self.assertLessEqual(set(SIX_DIGITS.findall(text)), {"123456"})
+                self.assertLessEqual(set(SIX_DIGITS.findall(text)), {"123456", "１２３４５６"})
                 self.assertLessEqual(set(STREAMLIT_HOST.findall(text)), {"example.streamlit.app"})
 
 
