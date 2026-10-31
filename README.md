@@ -19,7 +19,17 @@ claude plugin list
 
 ## 導入（Codex）
 
-（確かめてから書く）
+> まだ手元の Codex で確かめていない（2026-11-01 時点で、このマシンに Codex が入っていない）。手順は Codex の公式の文書（https://learn.chatgpt.com/docs/build-skills ）による。
+
+Codex はユーザー単位のスキルを `~/.agents/skills` から読み、シンボリックリンクをたどる。サブディレクトリを再帰的に探すかは文書に書かれていないので、スキルを1つずつリンクする。
+
+```bash
+mkdir -p ~/.agents/skills
+for s in ~/github/keirin-platform/keirin-research/skills/*/; do ln -s "$s" ~/.agents/skills/"$(basename "$s")"; done
+```
+
+- スキルは知識を `../../knowledge/` で指す。リンクを実体の場所で解決すれば（`cat` などのふつうのファイルの読み方なら実体になる）、リポジトリの `knowledge/` に届く。届かないときは、リポジトリの根の `AGENTS.md` から読ませる。
+- 使う側のリポジトリ（keirin-platform など）で Codex を使うなら、そのリポジトリの `AGENTS.md` に「競輪のドメイン知識は keirin-research にある」と書いておく。
 
 ## スキル
 
