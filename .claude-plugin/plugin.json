@@ -1,0 +1,6 @@
+{
+  "name": "keirin-research",
+  "version": "0.1.0",
+  "description": "競輪の検証と予想で、ドメイン知識と方法論を共通認識として使うためのプラグイン",
+  "author": { "name": "shimomo" }
+}
