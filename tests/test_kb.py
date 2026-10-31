@@ -467,34 +467,34 @@ class KeirinCheckTests(unittest.TestCase):
         )
 
     def test_candidates_are_checked(self):
-        root = make_tree({"candidates.md": "## CAND-001 x\n"})
+        root = make_tree({"candidates/lines.md": "## CAND-001 x\n"})
         errors = kb.check(root)
         self.assertEqual(len(errors), 8, errors)
-        self.assert_error(errors, "candidates.md:1: CAND-001", "必須キー「文献の根拠」")
+        self.assert_error(errors, "candidates/lines.md:1: CAND-001", "必須キー「文献の根拠」")
 
     def test_valid_candidate_passes(self):
-        root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "candidates.md": VALID_CAND})
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "candidates/lines.md": VALID_CAND})
         self.assertEqual(kb.check(root), [])
         self.assertEqual([e.id for e in kb.load_candidates(root)], ["CAND-001"])
         self.assertEqual([e.id for e in kb.load(root)], ["RULE-001"])
 
     def test_candidate_id_must_use_cand_prefix(self):
-        root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "candidates.md": VALID_CAND.replace("CAND-001", "RULE-009")})
-        self.assert_error(kb.check(root), "candidates.md", "RULE-009", "CAND")
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "candidates/lines.md": VALID_CAND.replace("CAND-001", "RULE-009")})
+        self.assert_error(kb.check(root), "candidates/lines.md", "RULE-009", "CAND")
 
     def test_candidate_date_is_checked(self):
-        root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "candidates.md": VALID_CAND.replace("2026-11-01", "11月1日")})
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "candidates/lines.md": VALID_CAND.replace("2026-11-01", "11月1日")})
         self.assert_error(kb.check(root), "CAND-001", "最終確認日")
 
     def test_knowledge_cannot_depend_on_candidate(self):
         root = make_tree({
             "knowledge/domain/rules.md": with_source("オーナー（2026-11-01 の会話）").replace("- 依存: なし", "- 依存: CAND-001"),
-            "candidates.md": VALID_CAND.replace("- 関係する知識: RULE-001", "- 関係する知識: なし"),
+            "candidates/lines.md": VALID_CAND.replace("- 関係する知識: RULE-001", "- 関係する知識: なし"),
         })
         self.assertEqual(kb.check(root), ["knowledge/domain/rules.md:1: RULE-001: 依存「CAND-001」は候補（候補には依存できない）"])
 
     def test_candidate_related_knowledge_must_exist(self):
-        root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "candidates.md": VALID_CAND.replace("RULE-001", "LAW-009")})
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "candidates/lines.md": VALID_CAND.replace("RULE-001", "LAW-009")})
         self.assert_error(kb.check(root), "CAND-001", "関係する知識「LAW-009」が見つからない")
 
     def test_platform_source_requires_commit(self):
@@ -541,21 +541,21 @@ class KeirinCheckTests(unittest.TestCase):
         root = make_tree({
             "skills/x/SKILL.md": "# x\n123456\n",
             "evals/t1/prompt.md": "123456\n",
-            "candidates.md": VALID_CAND.replace("p=0.65", "p=0.65 123456").replace("RULE-001", "なし"),
+            "candidates/lines.md": VALID_CAND.replace("p=0.65", "p=0.65 123456").replace("RULE-001", "なし"),
             "AGENTS.md": "123456\n",
             "README.md": "123456\n",
             "CLAUDE.md": "123456\n",
         })
         errors = kb.check(root)
-        for path in ("skills/x/SKILL.md:2:", "evals/t1/prompt.md:1:", "candidates.md:", "AGENTS.md:1:", "README.md:1:", "CLAUDE.md:1:"):
+        for path in ("skills/x/SKILL.md:2:", "evals/t1/prompt.md:1:", "candidates/lines.md:", "AGENTS.md:1:", "README.md:1:", "CLAUDE.md:1:"):
             self.assert_error(errors, path, "123456")
 
     def test_vocabulary_scan_covers_candidates(self):
         root = make_tree({
             "knowledge/domain/vocabulary.md": VALID_TERM,
-            "candidates.md": VALID_CAND.replace("雨のレースで", "1号車は雨のレースで").replace("RULE-001", "なし"),
+            "candidates/lines.md": VALID_CAND.replace("雨のレースで", "1号車は雨のレースで").replace("RULE-001", "なし"),
         })
-        self.assertEqual(kb.check(root), ["candidates.md:3: 避ける言い方「号車」"])
+        self.assertEqual(kb.check(root), ["candidates/lines.md:3: 避ける言い方「号車」"])
 
     def test_observations_checked_only_when_given(self):
         root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "obs/observations.md": "## OBS-001 x\n- 日付: 2000-01-01\n"})
@@ -579,13 +579,35 @@ class KeirinCheckTests(unittest.TestCase):
     def test_observation_may_relate_to_a_candidate(self):
         root = make_tree({
             "knowledge/domain/rules.md": VALID_RULE,
-            "candidates.md": VALID_CAND,
+            "candidates/lines.md": VALID_CAND,
             "obs/observations.md": VALID_OBS.replace("RULE-001", "CAND-001"),
         })
         self.assertEqual(kb.check(root, observations=root / "obs/observations.md"), [])
 
+    def test_candidates_folder_skips_readme_and_reads_every_topic(self):
+        root = make_tree({
+            "knowledge/domain/rules.md": VALID_RULE,
+            "candidates/README.md": VALID_CAND.replace("CAND-001", "CAND-009"),
+            "candidates/lines.md": VALID_CAND,
+            "candidates/riders.md": VALID_CAND.replace("CAND-001", "CAND-002"),
+        })
+        self.assertEqual(kb.check(root), [])
+        self.assertEqual([e.id for e in kb.load_candidates(root)], ["CAND-001", "CAND-002"])
+
+    def test_candidate_duplicate_across_files(self):
+        root = make_tree({
+            "knowledge/domain/rules.md": VALID_RULE,
+            "candidates/lines.md": VALID_CAND,
+            "candidates/riders.md": VALID_CAND,
+        })
+        self.assert_error(kb.check(root), "candidates/riders.md:1: CAND-001", "重複", "candidates/lines.md:1")
+
+    def test_candidate_file_size_limit(self):
+        root = make_tree({"knowledge/domain/rules.md": VALID_RULE, "candidates/lines.md": pad_to(VALID_CAND, 30001)})
+        self.assert_error(kb.check(root), "candidates/lines.md:1:", "バイト")
+
     def test_next_id_for_candidates(self):
-        root = make_tree({"candidates.md": VALID_CAND + "\n" + VALID_CAND.replace("CAND-001", "CAND-003")})
+        root = make_tree({"candidates/lines.md": VALID_CAND + "\n" + VALID_CAND.replace("CAND-001", "CAND-003")})
         self.assertEqual(kb.next_id(kb.load_candidates(root), "CAND"), "CAND-004")
 
 
@@ -685,7 +707,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual((without.returncode, without.stdout), (0, "\n"))
 
     def test_cli_next_id_for_candidates(self):
-        root = make_tree({"candidates.md": VALID_CAND.replace("RULE-001", "なし")})
+        root = make_tree({"candidates/lines.md": VALID_CAND.replace("RULE-001", "なし")})
         result = self.run_kb("next-id", "CAND", "--root", str(root))
         self.assertEqual((result.returncode, result.stdout), (0, "CAND-002\n"))
 

@@ -78,8 +78,8 @@ STATES = ("確認済み", "否定")
 COLLATIONS = ("照合済み", "未照合")
 DATE_KEYS = ("最終確認日",)
 
-# 保留の候補（知識ではない）。リポジトリの根に置き、知識はこれに依存できない
-CANDIDATES_FILE = "candidates.md"
+# 保留の候補（知識ではない）。根の candidates/ にテーマごとのファイルで置き、知識はこれに依存できない
+CANDIDATES_DIR = "candidates"
 CANDIDATE_PREFIX = "CAND"
 CANDIDATE_KEYS = ("内容", "文献の根拠", "保留の理由", "前回の試算", "判断に要るデータ", "見直しの時期", "最終確認日", "関係する知識")
 
@@ -95,8 +95,8 @@ PUBLIC_PATTERNS = {
     "内部 API の場所": r"/pc/json",
     "内部 API の種類の番号": r"JSJ[0-9]{3}",
 }
-PUBLIC_ROOT_FILES = ("candidates.md", "AGENTS.md", "CLAUDE.md", "README.md")
-PUBLIC_FOLDERS = ("knowledge", "skills", "evals")
+PUBLIC_ROOT_FILES = ("AGENTS.md", "CLAUDE.md", "README.md")
+PUBLIC_FOLDERS = ("knowledge", CANDIDATES_DIR, "skills", "evals")
 
 KNOWLEDGE_MAX_BYTES = 30_000
 SKILL_MAX_BYTES = 12_000
@@ -172,10 +172,16 @@ def load(root: Path) -> list[Entry]:
     return entries
 
 
+def _candidate_files(root: Path) -> list[Path]:
+    return sorted(p for p in (Path(root) / CANDIDATES_DIR).glob("*.md") if p.name != "README.md")
+
+
 def load_candidates(root: Path) -> list[Entry]:
-    """根の candidates.md の候補（保留したもの）を読む。ファイルがなければ空。"""
-    path = Path(root) / CANDIDATES_FILE
-    return parse_file(path, Path(root)) if path.exists() else []
+    """candidates/*.md（README.md を除く）の候補（保留したもの）をすべて読む。"""
+    entries: list[Entry] = []
+    for path in _candidate_files(root):
+        entries.extend(parse_file(path, Path(root)))
+    return entries
 
 
 def _id_list(value: str) -> list[str]:
@@ -275,9 +281,7 @@ def _valid_source(item: str) -> bool:
 
 def _check_sizes(root: Path) -> list[str]:
     errors = []
-    targets = [(p, KNOWLEDGE_MAX_BYTES) for p in _markdown_files(root)]
-    if (root / CANDIDATES_FILE).exists():
-        targets.append((root / CANDIDATES_FILE, KNOWLEDGE_MAX_BYTES))
+    targets = [(p, KNOWLEDGE_MAX_BYTES) for p in _markdown_files(root) + _candidate_files(root)]
     targets += [(p, SKILL_MAX_BYTES) for p in sorted((root / "skills").glob("*/SKILL.md"))]
     for path, limit in targets:
         size = path.stat().st_size
@@ -293,8 +297,7 @@ def _vocab_scan_files(root: Path) -> list[Path]:
         for p in _markdown_files(root)
         if p.name != "README.md" and p.relative_to(root).as_posix() != FILE_FOR_PREFIX[VOCAB_PREFIX]
     ]
-    candidates = [root / CANDIDATES_FILE] if (root / CANDIDATES_FILE).exists() else []
-    return knowledge + candidates + sorted((root / "skills").rglob("*.md"))
+    return knowledge + _candidate_files(root) + sorted((root / "skills").rglob("*.md"))
 
 
 def public_scan_files(root: Path) -> list[Path]:
@@ -404,7 +407,7 @@ def _check_simple(
     errors: list[str] = []
     if entry.id in first_seen:
         first = first_seen[entry.id]
-        errors.append(f"{where}: ID が重複している（初出 {first.line} 行目）")
+        errors.append(f"{where}: ID が重複している（初出 {first.path.as_posix()}:{first.line}）")
     else:
         first_seen[entry.id] = entry
     for key in keys:
@@ -424,7 +427,7 @@ def _check_candidates(root: Path, known_ids: set[str]) -> list[str]:
     errors: list[str] = []
     first_seen: dict[str, Entry] = {}
     for entry in load_candidates(root):
-        where = f"{CANDIDATES_FILE}:{entry.line}: {entry.id or '(IDなし)'}"
+        where = f"{entry.path.as_posix()}:{entry.line}: {entry.id or '(IDなし)'}"
         errors += _check_simple(entry, where, CANDIDATE_ID_RE, CANDIDATE_KEYS, ("最終確認日",), known_ids, first_seen)
     return errors
 
@@ -471,7 +474,7 @@ def build_parser() -> argparse.ArgumentParser:
     def add_root(p: argparse.ArgumentParser) -> None:
         p.add_argument("--root", type=Path, default=DEFAULT_ROOT, help="リポジトリの根（既定: tools/ の親）")
 
-    p_check = sub.add_parser("check", help="knowledge/・candidates.md・skills/ などを検査する")
+    p_check = sub.add_parser("check", help="knowledge/・candidates/・skills/ などを検査する")
     add_root(p_check)
     p_check.add_argument(
         "--observations", type=Path, default=None, help="keirin-data の observations.md も検査する"

@@ -1,4 +1,4 @@
-"""v1 の最初の知識が knowledge/ と candidates.md に揃っているかのテスト。
+"""v1 の最初の知識が knowledge/ と candidates/ に揃っているかのテスト。
 
 kb.py の単体テスト（test_kb.py）と違い、実際のリポジトリの知識を読む。
 """
@@ -52,6 +52,22 @@ class TestDomainSeed(unittest.TestCase):
 
     def test_registration_criteria(self):
         self.assertTrue(matching("COMMIT", 内容=["95%", "前半", "0.05", "0.03"]))
+
+
+class TestDataAndCandidateSeed(unittest.TestCase):
+    def test_lines_table_period(self):
+        self.assertTrue(matching("DATA-KD", 内容=["2026-10-05", "推定"]))
+
+    def test_blind_spot_of_laps(self):
+        self.assertTrue(matching("BLIND", 内容=["周回"]))
+
+    def test_weather_candidate(self):
+        self.assertTrue(matching("CAND", kb.load_candidates(ROOT), 内容=["雨"], 見直しの時期=["2026-12"]))
+
+    def test_line_linkage_is_somewhere(self):
+        laws = matching("LAW", 内容=["ライン", "連動"])
+        candidates = matching("CAND", kb.load_candidates(ROOT), 内容=["ライン", "連動"])
+        self.assertTrue(laws or candidates)
 
 
 if __name__ == "__main__":
