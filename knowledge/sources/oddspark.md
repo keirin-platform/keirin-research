@@ -6,12 +6,12 @@
 
 - 内容: オッズパークでは、過去のレースの並び（レース前の予想）が取れる（2025-01 のレースでも確認）。間隔は robots.txt の Crawl-delay に従い 10秒以上あける。
   KEIRIN.JP と同じレースで並びが一致することを確かめた（2026-10-05 の2レース）。
-  ただし 2026-10-24 から、keirin-platform の収集（GitHub Actions）の IP に HTTP 403 が返り、取得は止まっている。そのため 2026-11-01 時点で、keirin-data にオッズパーク由来の並びはない（DATA-KD-003）。
+  keirin-platform の収集（GitHub Actions）からは 2026-10-24 以降 HTTP 403 が返るので、過去分は手元から取っている（2026-11-07 から）。2025-08-24〜2026-10-04 の並びはオッズパーク由来で、keirin-data の lines 表に入っている（DATA-KD-003）。
 - 種別: データで確かめた事実
 - 根拠: keirin-platform での取得の実例
-- 成立期間: 取得の停止は 2026-10-24 から（再開はオーナーと相談）
-- 出典: keirin-platform:docs/lines.md@0850049 取得元、keirin-platform:CLAUDE.md@0850049 現状と TODO
-- 最終確認日: 2026-11-01
+- 成立期間: 2026-11-17 時点。それより前へ遡るかは、オーナーと相談して決める
+- 出典: keirin-platform:docs/lines.md@a63c051 取得元、keirin-platform:CLAUDE.md@a63c051 現状と TODO
+- 最終確認日: 2026-11-17
 - 依存: なし
 
 ## SRC-OP-002 引用も禁止
